@@ -98,7 +98,7 @@ bool run_process(size_t num_tokens, char** tokens) {
     p_array[processIndex].running = false;
     p_array[processIndex].terminating = false;
     p_array[processIndex].result = -1;
-    setpgid(result, 0);
+
     if (!background) {
       completeProcess(&p_array[processIndex]);
     } else {
@@ -123,9 +123,9 @@ bool my_mini_process_command(size_t num_tokens, char **tokens) {
 
   if (strcmp(tokens[0], "terminate") == 0) {
     for (int i = 0; i< processIndex; i++) {
-      if (atoi(tokens[1]) == p_array[i].pid) {
+      if (atoi(tokens[1]) == p_array[i].pid && p_array[i].running) {
         p_array[i].terminating = true;
-        killpg(p_array[i].pid, SIGTERM);
+        kill(p_array[i].pid, SIGTERM);
         return true;
       }
     }
@@ -196,7 +196,7 @@ void my_process_command(size_t num_tokens, char **tokens) {
 void my_quit(void) {
   for (int i = 0; i < processIndex; i++) {
     if (p_array[i].running) {
-      killpg(p_array[i].pid, SIGTERM);
+      kill(p_array[i].pid, SIGTERM);
     }
   }
   printf("Goodbye!\n");

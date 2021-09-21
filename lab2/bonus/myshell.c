@@ -30,24 +30,25 @@ typedef struct Process {
 process_t* p_array;
 int processIndex = 0;
 
-void ctrl_c(int notused) {
+void ctrl_c() {
  
   for (int i = 0; i < processIndex; i++) {
    if (p_array[i].waiting) { 
-      killpg(p_array[i].pid, SIGINT);
+      kill(p_array[i].pid, SIGINT);
       p_array[i].terminating = true;
       printf("\n[%d] interrupted\n", p_array[i].pid);
    }
   }
 }
 
-void ctrl_z(int notused) {
+void ctrl_z() {
 
   for (int i = 0; i < processIndex; i++) {
     if (p_array[i].waiting) {
-      killpg(p_array[i].pid, SIGTSTP);
+      kill(p_array[i].pid, SIGSTOP);
       p_array[i].stopped = true;
       printf("\n[%d] stopped\n", p_array[i].pid);
+      return;
     }
   }
 }
@@ -105,7 +106,9 @@ bool run_process(size_t num_tokens, char** tokens) {
   bool background = strcmp(tokens[num_tokens-2], "&") == 0;
 
   int result = fork();
+
   if (result == 0) {
+    signal(SIGTSTP, SIG_IGN);
     if (background)
       tokens[num_tokens-2] = NULL;
     if (hasRead) {
@@ -131,7 +134,6 @@ bool run_process(size_t num_tokens, char** tokens) {
     p_array[i].stopped = false;
     p_array[i].waiting = false;
 
-    setpgid(result, 0);
     if (!background) {
       completeProcess(&p_array[i]);
     } else {
@@ -148,7 +150,7 @@ bool my_mini_process_command(size_t num_tokens, char **tokens) {
     for (int i = 0; i < processIndex; i++) {
       if (atoi(tokens[1]) == p_array[i].pid) {
         if (p_array[i].stopped) {
-          killpg(p_array[i].pid, SIGCONT);
+          kill(p_array[i].pid, SIGCONT);
           p_array[i].stopped = false;
           completeProcess(&p_array[i]);
         }
@@ -170,9 +172,13 @@ bool my_mini_process_command(size_t num_tokens, char **tokens) {
 
   if (strcmp(tokens[0], "terminate") == 0) {
     for (int i = 0; i< processIndex; i++) {
-      if (atoi(tokens[1]) == p_array[i].pid) {
+      if (atoi(tokens[1]) == p_array[i].pid && (p_array[i].running || p_array[i].stopped)) {
+        if (p_array[i].stopped)
+          kill(p_array[i].pid, SIGCONT);
+
         p_array[i].terminating = true;
-        killpg(p_array[i].pid, SIGTERM);
+        p_array[i].stopped = false;
+        kill(p_array[i].pid, SIGTERM);
         return false;
       }
     }
@@ -245,8 +251,11 @@ void my_process_command(size_t num_tokens, char **tokens) {
 
 void my_quit(void) {
   for (int i = 0; i < processIndex; i++) {
-    if (p_array[i].running) {
-      killpg(p_array[i].pid, SIGTERM);
+    if (p_array[i].running || p_array[i].stopped) {
+      if (p_array[i].stopped)
+        kill(p_array[i].pid, SIGCONT);
+
+      kill(p_array[i].pid, SIGTERM);
     }
   }
   printf("Goodbye!\n");
