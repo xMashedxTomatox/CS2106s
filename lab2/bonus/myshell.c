@@ -22,19 +22,48 @@ typedef struct Process {
   pid_t pid;
   bool running;
   bool terminating;
+  bool stopped;
+  bool waiting;
   int result;
 } process_t;
 
 process_t* p_array;
 int processIndex = 0;
 
+void ctrl_c(int notused) {
+
+  for (int i = 0; i < processIndex; i++) {
+   if (p_array[i].waiting) { 
+      killpg(p_array[i].pid, SIGINT);
+      p_array[i].terminating = true;
+      printf("\n[%d] interrupted\n", p_array[i].pid);
+   }
+  }
+}
+
+void ctrl_z(int notused) {
+
+  for (int i = 0; i < processIndex; i++) {
+    if (p_array[i].waiting) {
+      killpg(p_array[i].pid, SIGTSTP);
+      p_array[i].stopped = true;
+      printf("\n[%d] stopped\n", p_array[i].pid);
+    }
+  }
+}
+
 void my_init(void) {
+  (void) signal(SIGTSTP, ctrl_z);
+  (void) signal(SIGINT, ctrl_c);
+
   p_array = malloc(MAX_PROCESSES * sizeof(process_t));
 }
 
 void completeProcess(process_t* p) {
   int status;
-  waitpid(p -> pid, &status, 0);
+  p -> waiting = true;
+  waitpid(p -> pid, &status, WUNTRACED);
+  p -> waiting = false;
   p -> running = false;
   p -> terminating = false;
   p -> result = WEXITSTATUS(status);
@@ -94,31 +123,49 @@ bool run_process(size_t num_tokens, char** tokens) {
     execv(tokens[0], tokens);
     return true;
   } else {
-    p_array[processIndex].pid = result;
-    p_array[processIndex].running = false;
-    p_array[processIndex].terminating = false;
-    p_array[processIndex].result = -1;
+    int i = processIndex;
+    processIndex++;
+    p_array[i].pid = result;
+    p_array[i].running = false;
+    p_array[i].terminating = false;
+    p_array[i].stopped = false;
+    p_array[i].waiting = false;
+
     setpgid(result, 0);
     if (!background) {
-      completeProcess(&p_array[processIndex]);
+      completeProcess(&p_array[i]);
     } else {
-      p_array[processIndex].running = true;
+      p_array[i].running = true;
       printf("Child[%d] in background\n", result);
     }
-    processIndex++;
     return true;
   }
 }
 
 bool my_mini_process_command(size_t num_tokens, char **tokens) {
-  if (strcmp(tokens[0], "wait") == 0) {
+
+  if (strcmp(tokens[0], "fg") == 0) {
     for (int i = 0; i < processIndex; i++) {
-      if (atoi(tokens[1]) == p_array[i].pid && p_array[i].running) {
-        completeProcess(&p_array[i]);
-        return true;        
+      if (atoi(tokens[1]) == p_array[i].pid) {
+        if (p_array[i].stopped) {
+          killpg(p_array[i].pid, SIGCONT);
+          p_array[i].stopped = false;
+          completeProcess(&p_array[i]);
+        }
+        return false;
       }
     }
-    return true;
+    return false;
+  }
+
+  if (strcmp(tokens[0], "wait") == 0) {
+    for (int i = 0; i < processIndex; i++) {
+      if (p_array[i].running && atoi(tokens[1]) == p_array[i].pid) {
+        completeProcess(&p_array[i]);
+        return false;        
+      }
+    }
+    return false;
   }
 
   if (strcmp(tokens[0], "terminate") == 0) {
@@ -126,16 +173,19 @@ bool my_mini_process_command(size_t num_tokens, char **tokens) {
       if (atoi(tokens[1]) == p_array[i].pid) {
         p_array[i].terminating = true;
         killpg(p_array[i].pid, SIGTERM);
-        return true;
+        return false;
       }
     }
-    return true;
+    return false;
   }
 
   if (strcmp(tokens[0], "info") == 0) {
     for (int i = 0; i < processIndex; i++) {
       printf("[%d] ", p_array[i].pid);
-      if (p_array[i].terminating || p_array[i].running) {
+      if (p_array[i].stopped) {
+        printf("Stopped\n");
+        continue;
+      } else if (p_array[i].terminating || p_array[i].running) {
         int status;
         int cpid = waitpid(p_array[i].pid, &status, WNOHANG);
         if(cpid == 0) {
@@ -153,7 +203,7 @@ bool my_mini_process_command(size_t num_tokens, char **tokens) {
       } 
       printf("%s %d\n", "Exited", p_array[i].result);      
     }
-    return true;
+    return false;
   }
 
   return run_process(num_tokens, tokens);
