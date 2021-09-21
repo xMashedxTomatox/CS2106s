@@ -31,7 +31,7 @@ process_t* p_array;
 int processIndex = 0;
 
 void ctrl_c(int notused) {
-
+ 
   for (int i = 0; i < processIndex; i++) {
    if (p_array[i].waiting) { 
       killpg(p_array[i].pid, SIGINT);
