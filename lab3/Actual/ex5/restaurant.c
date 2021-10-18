@@ -27,7 +27,7 @@ struct node {
 };
 
 typedef struct TableInfo {
-  int* available_tables;
+  bool* available_tables;
   int max_table_count;
   int start_index;
 } table_info;
@@ -47,13 +47,12 @@ void restaurant_init(int num_tables[5]) {
   for (int i = 0; i < SIZETABLE; i++) {
     info[i].start_index = sum;
     info[i].max_table_count = num_tables[i];
-    info[i].available_tables = malloc(num_tables[i] * sizeof(int));
+    info[i].available_tables = malloc(num_tables[i] * sizeof(bool));
     for (int j = 0; j < num_tables[i]; j++)
-      info[i].available_tables[j] = i + 1;  ;//initializing all tables to not occupied
+      info[i].available_tables[j] = false;//initializing all tables to not occupied
     sum += num_tables[i];
   }
 }
-
 
 void restaurant_destroy(void) {
   // Write deinitialization code here (called once at the end of the program).
@@ -72,13 +71,12 @@ int request_for_table(group_state *state, int num_people) {
   new_node -> next = NULL;
   sem_init(&(new_node -> sem), 0, 0); 
   bool has_free = false;
-
-  int idx = 1;
-  int relative_idx = 1;
+  int idx = 0;
+  int relative_idx = 0;
 
   for (int i = num_people - 1; i < SIZETABLE; i++) {
     for (int j = 0; j < info[i].max_table_count; j++) {
-      if (info[i].available_tables[j] == i + 1) {
+      if (info[i].available_tables[j] == false) {
         has_free = true;
         idx = i;
         relative_idx = j;
@@ -88,20 +86,6 @@ int request_for_table(group_state *state, int num_people) {
     if (has_free)
       break;
   }
-
-  if (!has_free) {
-    int min = SIZETABLE + 1;
-    for (int i = num_people - 1; i < SIZETABLE; i++) {
-      for (int j = 0; j < info[i].max_table_count; j++) {
-        if (info[i].available_tables[j] >= num_people && info[i].available_tables[j] < min) {
-          has_free = true;
-          min = info[i].available_tables[j];
-          idx = i;
-          relative_idx = j;
-        }
-      }
-    }
-  } 
 
   if (!has_free) {
     state -> number_people = num_people;
@@ -120,10 +104,10 @@ int request_for_table(group_state *state, int num_people) {
     sem_wait(&(new_node -> sem));
   }
   else {
+    info[idx].available_tables[relative_idx] = true;
     state -> assigned_table_count = idx + 1;
     state -> relative_table_idx = relative_idx;
     state -> number_people = num_people;
-    info[idx].available_tables[relative_idx] -= num_people;
     on_enqueue();
   }
 
@@ -138,44 +122,38 @@ int request_for_table(group_state *state, int num_people) {
 void leave_table(group_state *state) {
   // Write your code here.
   sem_wait(&mutex);
-  info[state -> assigned_table_count - 1].available_tables[state -> relative_table_idx] += state -> number_people;
-  int table_max = info[state -> assigned_table_count - 1].available_tables[state -> relative_table_idx];
+  int table_max = state -> assigned_table_count;
+  info[state -> assigned_table_count - 1].available_tables[state -> relative_table_idx] = false;
   bool found = false;
   node_t* release_node = NULL;
-  do {
-    found = false;
-    if (q_head) {
-      node_t* prev = q_head;
-      node_t* temp_head = q_head -> next;
-      if (q_head -> state -> number_people <= table_max) {
-        found = true;
-        release_node = q_head;
-        q_head = q_head -> next;
-      } else {
-        while(temp_head) {
-          if (temp_head -> state -> number_people <= table_max) {
-            found = true;
-            release_node = temp_head;
-            prev -> next = temp_head -> next;
-            break;
-          } else {
-            prev = temp_head;
-            temp_head = temp_head -> next;
-          }
+  if (q_head) {
+    node_t* prev = q_head;
+    node_t* temp_head = q_head -> next;
+    if (q_head -> state -> number_people <= table_max) {
+      found = true;
+      release_node = q_head;
+      q_head = q_head -> next;
+    } else {
+      while(temp_head) {
+        if (temp_head -> state -> number_people <= table_max) {
+          found = true;
+          release_node = temp_head;
+          prev -> next = temp_head -> next;
+          break;
+        } else {
+          prev = temp_head;
+          temp_head = temp_head -> next;
         }
       }
     }
-    if (found) {
-      table_max -= release_node -> state -> number_people;
-      release_node -> state -> assigned_table_count = state -> assigned_table_count;
-      release_node -> state -> relative_table_idx = state -> relative_table_idx;
-      info[state -> assigned_table_count - 1].available_tables[state -> relative_table_idx] -= release_node -> state -> number_people;
-      sem_post(&(release_node -> sem));
-      sem_wait(&mutex);
-    } 
-  } while (found);
-  if(!found)
+  }
+  if (found) {
+    release_node -> state -> assigned_table_count = table_max;
+    release_node -> state -> relative_table_idx = state -> relative_table_idx;
+    info[state -> assigned_table_count - 1].available_tables[state -> relative_table_idx] = true;
+    sem_post(&(release_node -> sem));
+  } else {
     sem_post(&mutex);
-
+  }
 }
 
