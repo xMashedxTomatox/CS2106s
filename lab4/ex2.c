@@ -14,8 +14,6 @@
 #include <stdbool.h>
 #include <signal.h>
 #include <string.h>
-#include <fcntl.h>
-#include <errno.h>
 
 #define PAGE_SIZE 4096
 #define PAGE_SIZE_POW 12
@@ -23,11 +21,6 @@
 #define PAGE_ENTRY_POW 9
 #define PAGE_TABLE_LAYER 4
 #define LORMS_INIT_PAGES 2016
-
-#define UNACCESSED 0
-#define ACCESSED 1
-#define DIRTY 2
-#define EVICTED 3
 
 typedef struct node node_t;
 typedef struct page_table page_table_t;
@@ -40,10 +33,9 @@ struct node {
 
 struct page_table {
   page_table_t* next;
-  int state;
-  int offset;
   int accessed_entries;
   bool init;
+  bool accessed;
 };
 
 page_table_t highest_level_table;
@@ -52,13 +44,10 @@ node_t* list_head = NULL;
 node_t* list_tail = NULL;
 node_t* resident_pages_tail = NULL;
 node_t* resident_pages_head = NULL;
-node_t* free_head = NULL;
-node_t* free_tail = NULL;
 
 int lorms_max_pages = LORMS_INIT_PAGES;
+
 int resident_count = 0;
-long swap_size = 0;
-int swap_fd = 0;
 
 int* get_table_idx(long addr) {
   //printf("%ld\n", addr);
@@ -90,34 +79,9 @@ void handle_evict() {
     } else {
       resident_pages_head = ref -> next;
     }
-
-    page_table_t* entry = get_page_entry(ref -> addr);
-    if (entry -> state == DIRTY) {
-      entry -> state = EVICTED;
-      size_t offset = 0;
-      if (free_head != NULL) {
-        offset = free_head -> size;
-        node_t * remove = free_head;
-        if (free_head == free_tail) {
-          free_head = NULL;
-          free_head = NULL;
-        } else {
-          free_head = free_head -> next;
-        }
-        free(remove);
-      } else {
-        offset = swap_size;
-        swap_size++;
-      }
-      entry -> offset = offset;
-      if (pwrite(swap_fd, ref -> addr, PAGE_SIZE, offset * PAGE_SIZE) == -1) {
-        printf("swap write failed!");
-      }
-    } else {
-      entry -> state = UNACCESSED;
-    } 
     mprotect(ref -> addr, PAGE_SIZE, PROT_NONE);
-    madvise(ref -> addr, PAGE_SIZE, MADV_DONTNEED);
+    page_table_t* entry = get_page_entry(ref -> addr);
+    entry -> accessed = false;
     free(ref);
   }
 }
@@ -146,7 +110,10 @@ bool page_fault_handler(siginfo_t *si) {
   addr *= PAGE_SIZE;
   void* new_addr = (void*)addr;
 
-  if (curr -> state == UNACCESSED || curr -> state == EVICTED) {
+  if (curr -> accessed == false) {
+    mprotect(new_addr, PAGE_SIZE, PROT_READ);
+    curr -> accessed = true;
+
     node_t* new_node = malloc(sizeof(node_t));
     new_node -> addr = new_addr; 
     new_node -> size = PAGE_SIZE;
@@ -159,20 +126,11 @@ bool page_fault_handler(siginfo_t *si) {
       resident_pages_tail = new_node;
     }
     resident_count++;
-    if (curr -> state == EVICTED) {
-      mprotect(new_addr, PAGE_SIZE, PROT_READ | PROT_WRITE);
-      if(pread(swap_fd, new_addr, PAGE_SIZE, curr -> offset * PAGE_SIZE) == -1) {
-        printf("swap read failed!");
-      }
-    } 
-    mprotect(new_addr, PAGE_SIZE, PROT_READ);
-
-    curr -> state = ACCESSED;
     handle_evict();
-  } else if (curr -> state == ACCESSED) {
-    curr -> state = DIRTY;
+  } else {
     mprotect(new_addr, PAGE_SIZE, PROT_READ | PROT_WRITE);
-  } 
+  }
+
   return true;
 }
 
@@ -194,7 +152,7 @@ void init_page_table(page_table_t * ref) {
   ref -> next = malloc(PAGE_ENTRY_COUNT * sizeof(page_table_t));
   for (int i = 0; i < PAGE_ENTRY_COUNT; i++) {
     ref -> next[i].init = false;
-    ref -> next[i].state = UNACCESSED;
+    ref -> next[i].accessed = false;
     ref -> accessed_entries = 0;
   }
 }
@@ -240,13 +198,6 @@ void *userswap_alloc(size_t size) {
     action.sa_sigaction = sigseg_handler;
     sigaction(SIGSEGV, &action, NULL);
     sigseg_set = true;
-    pid_t pid = getpid();
-    char filename[100];
-    sprintf(filename, "%d.swap", pid);
-    if (access(filename, F_OK) == 0) 
-      remove(filename);
-    swap_fd = open(filename, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
-
   }
 
   size_t extra = PAGE_SIZE - (size % PAGE_SIZE);
@@ -280,17 +231,7 @@ void *userswap_alloc(size_t size) {
 bool remove_recur(page_table_t* curr, int curr_idx, int* idx_table) {
   if (curr_idx == -1) {
     curr -> init = false;
-    if (curr -> state == EVICTED) {
-      node_t * new_node = malloc(sizeof(node_t));
-      new_node -> next = NULL;
-      if (free_head == NULL) {
-        free_head = new_node;
-        free_tail = new_node;
-      } else {
-        free_tail -> next = new_node;
-        free_tail = new_node;
-      }
-    }
+    curr -> accessed = false;
     return true;
   }
   else {
@@ -326,7 +267,6 @@ void update_resident_list() {
     if (error == true) {
       node_t* remove = itor;
       resident_count--;
-
       if (itor == resident_pages_head) {
         if (resident_pages_head == resident_pages_tail) {
           resident_pages_head = NULL;
@@ -350,18 +290,6 @@ void update_resident_list() {
       itor = itor -> next;
     }
   }
-}
-
-void reset_swap() {
-  swap_size = 0;
-  node_t* itor = free_head;
-  while(itor) {
-    node_t* remove = itor;
-    itor = itor -> next;
-    free(remove);
-  }
-  free_head = NULL;
-  free_tail = NULL;
 }
 
 void userswap_free(void *mem) {
@@ -395,8 +323,6 @@ void userswap_free(void *mem) {
     increment_idx(idx, PAGE_ENTRY_COUNT);
   }
   update_resident_list();
-  if (resident_count == 0)
-    reset_swap();
   munmap(mem, itor -> size);
   free(itor);
 }
