@@ -179,8 +179,6 @@ void *userswap_alloc(size_t size) {
 }
 
 bool remove_recur(page_table_t* curr, int curr_idx, int* idx_table) {
-  if (curr -> init == false)
-     return false;
   if (curr_idx == -1) {
     counter--;
     curr -> init = false;

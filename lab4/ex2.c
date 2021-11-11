@@ -264,6 +264,8 @@ void update_resident_list() {
       }
       ref = &(ref -> next[idx[PAGE_TABLE_LAYER - 1 - i]]);
     }
+    if (ref -> init == false)
+      error = true;
     if (error == true) {
       node_t* remove = itor;
       resident_count--;
