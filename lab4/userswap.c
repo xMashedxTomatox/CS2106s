@@ -38,10 +38,15 @@ struct node {
   node_t* next;
 };
 
+typedef struct page_entry {
+  int state;
+  long offset;
+  int fd;
+} page_entry_t;
+
 struct page_table {
   page_table_t* next;
-  int state;
-  int offset;
+  page_entry_t entry;
   int accessed_entries;
   bool init;
 };
@@ -92,29 +97,38 @@ void handle_evict() {
     }
 
     page_table_t* entry = get_page_entry(ref -> addr);
-    if (entry -> state == DIRTY) {
-      entry -> state = EVICTED;
+    if (entry -> entry.state == DIRTY) {
+      int fd = 0;
       size_t offset = 0;
-      if (free_head != NULL) {
-        offset = free_head -> size;
-        node_t * remove = free_head;
-        if (free_head == free_tail) {
-          free_head = NULL;
-          free_head = NULL;
+      if (entry -> entry.fd == -1) {
+        fd = swap_fd;
+        entry -> entry.state = EVICTED;
+        if (free_head != NULL) {
+          offset = free_head -> size;
+          node_t * remove = free_head;
+          if (free_head == free_tail) {
+            free_head = NULL;
+            free_head = NULL;
+          } else {
+            free_head = free_head -> next;
+          }
+          free(remove);
         } else {
-          free_head = free_head -> next;
+          offset = swap_size;
+          swap_size++;
         }
-        free(remove);
+        entry -> entry.offset = offset;
       } else {
-        offset = swap_size;
-        swap_size++;
+        fd = entry -> entry.fd;
+        offset = entry -> entry.offset;
+        entry -> entry.state = UNACCESSED;
       }
-      entry -> offset = offset;
-      if (pwrite(swap_fd, ref -> addr, PAGE_SIZE, offset * PAGE_SIZE) == -1) {
-        fprintf(stderr, "\nError %d: Loading from \"testing\" file failed: %s %ld %ld %ld\n", errno, strerror(errno), offset, swap_size, (long)(ref -> addr));
+      
+      if (pwrite(fd, ref -> addr, PAGE_SIZE, offset * PAGE_SIZE) == -1) {
+        fprintf(stderr, "\nError %d: Loading from \"testing\" file failed: %s %ld %ld\n", errno, strerror(errno), offset, (long)(ref -> addr));
       }
     } else {
-      entry -> state = UNACCESSED;
+      entry -> entry.state = UNACCESSED;
     } 
     mprotect(ref -> addr, PAGE_SIZE, PROT_NONE);
     madvise(ref -> addr, PAGE_SIZE, MADV_DONTNEED);
@@ -146,7 +160,7 @@ bool page_fault_handler(siginfo_t *si) {
   addr *= PAGE_SIZE;
   void* new_addr = (void*)addr;
 
-  if (curr -> state == UNACCESSED || curr -> state == EVICTED) {
+  if (curr -> entry.state == UNACCESSED || curr -> entry.state == EVICTED) {
     node_t* new_node = malloc(sizeof(node_t));
     new_node -> addr = new_addr; 
     new_node -> size = PAGE_SIZE;
@@ -159,18 +173,24 @@ bool page_fault_handler(siginfo_t *si) {
       resident_pages_tail = new_node;
     }
     resident_count++;
-    if (curr -> state == EVICTED) {
-      mprotect(new_addr, PAGE_SIZE, PROT_READ | PROT_WRITE);
-      if(pread(swap_fd, new_addr, PAGE_SIZE, curr -> offset * PAGE_SIZE) == -1) {
+    mprotect(new_addr, PAGE_SIZE, PROT_READ | PROT_WRITE);
+
+    if (curr -> entry.state == EVICTED) {
+      if(pread(swap_fd, new_addr, PAGE_SIZE, curr -> entry.offset * PAGE_SIZE) == -1) {
         fprintf(stderr, "\nError %d: Loading from \"testing\" file failed: %s %ld\n", errno, strerror(errno), (long)(new_addr));
       }
-    } 
+    } else if (curr -> entry.fd != -1) {
+      if(pread(curr -> entry.fd, new_addr, PAGE_SIZE, curr -> entry.offset * PAGE_SIZE) == -1) {
+        fprintf(stderr, "\nError %d: Loading from \"testing\" file failed: %s %ld\n", errno, strerror(errno), (long)(new_addr));
+      }
+    }
+
     mprotect(new_addr, PAGE_SIZE, PROT_READ);
 
-    curr -> state = ACCESSED;
+    curr -> entry.state = ACCESSED;
     handle_evict();
-  } else if (curr -> state == ACCESSED) {
-    curr -> state = DIRTY;
+  } else if (curr -> entry.state == ACCESSED) {
+    curr -> entry.state = DIRTY;
     mprotect(new_addr, PAGE_SIZE, PROT_READ | PROT_WRITE);
   } 
   return true;
@@ -194,12 +214,11 @@ void init_page_table(page_table_t * ref) {
   ref -> next = malloc(PAGE_ENTRY_COUNT * sizeof(page_table_t));
   for (int i = 0; i < PAGE_ENTRY_COUNT; i++) {
     ref -> next[i].init = false;
-    ref -> next[i].state = UNACCESSED;
     ref -> accessed_entries = 0;
   }
 }
 
-void insert_entry(int* idx) {
+void insert_entry(int* idx, int fd, int offset) {
   page_table_t* curr = &highest_level_table;
   page_table_t* prev = NULL;
 
@@ -217,6 +236,9 @@ void insert_entry(int* idx) {
   if (curr -> init == false) {
     curr -> init = true;
     curr -> next = NULL;
+    curr -> entry.state = UNACCESSED;
+    curr -> entry.fd = fd;
+    curr -> entry.offset = offset;
     prev -> accessed_entries++;
   }
 }
@@ -231,26 +253,34 @@ void increment_idx(int* idx, int size) {
     }
   }
 }
+void init_handler() {
+  struct sigaction action;
+  memset(&action, 0, sizeof(struct sigaction));
+  action.sa_flags = SA_SIGINFO;
+  action.sa_sigaction = sigseg_handler;
+  sigaction(SIGSEGV, &action, NULL);
+  sigseg_set = true;
+  pid_t pid = getpid();
+  char filename[100];
+  sprintf(filename, "%d.swap", pid);
+  if (access(filename, F_OK) == 0) 
+    remove(filename);
+  swap_fd = open(filename, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
+}
 
-void *userswap_alloc(size_t size) {
+void *userswap_handler(size_t size, bool is_map, int fd) {
   if (sigseg_set == 0) {
-    struct sigaction action;
-    memset(&action, 0, sizeof(struct sigaction));
-    action.sa_flags = SA_SIGINFO;
-    action.sa_sigaction = sigseg_handler;
-    sigaction(SIGSEGV, &action, NULL);
-    sigseg_set = true;
-    pid_t pid = getpid();
-    char filename[100];
-    sprintf(filename, "%d.swap", pid);
-    if (access(filename, F_OK) == 0) 
-      remove(filename);
-    swap_fd = open(filename, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG | S_IRWXO);
-
+    init_handler();
   }
 
-  size_t extra = PAGE_SIZE - (size % PAGE_SIZE);
-  size += extra;
+  if (size % PAGE_SIZE != 0)
+    size += PAGE_SIZE - (size % PAGE_SIZE);
+  
+  if (fd != -1) {
+    if(ftruncate(fd, size) == -1) {
+      fprintf(stderr, "\nError %d: Extending \"testing\" file failed: %s\n", errno, strerror(errno));
+    }
+  }
 
   void* addr = mmap(NULL, size, PROT_NONE,MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   long logical_addr = (long)(addr);
@@ -258,7 +288,7 @@ void *userswap_alloc(size_t size) {
   int pages_count = size/PAGE_SIZE;
 
   for (int i = 0; i < pages_count; i++) {
-    insert_entry(idx);
+    insert_entry(idx, fd, i);
     increment_idx(idx, PAGE_TABLE_LAYER);
   }
 
@@ -277,21 +307,17 @@ void *userswap_alloc(size_t size) {
   return addr;
 }
 
+void *userswap_alloc(size_t size) {
+  return userswap_handler(size, false, -1); 
+}
+
+void *userswap_map(int fd, size_t size) {
+  lseek(fd, 0, SEEK_SET);
+  return userswap_handler(size, true, fd);
+}
 bool remove_recur(page_table_t* curr, int curr_idx, int* idx_table) {
   if (curr_idx == -1) {
-    curr -> init = false;
-    if (curr -> state == EVICTED) {
-      node_t * new_node = malloc(sizeof(node_t));
-      new_node -> size = curr -> offset;
-      new_node -> next = NULL;
-      if (free_head == NULL) {
-        free_head = new_node;
-        free_tail = new_node;
-      } else {
-        free_tail -> next = new_node;
-        free_tail = new_node;
-      }
-    }
+    curr -> init = false; 
     return true;
   }
   else {
@@ -392,14 +418,34 @@ void userswap_free(void *mem) {
     }
     prev -> next = itor -> next;
   }
-
-  int* idx = get_table_idx((long)(mem));
+  long addr = (long)(mem);
+  int* idx = get_table_idx(addr);
   int page_count = itor -> size / PAGE_SIZE;
   for (int i = 0; i < page_count; i++) {
+    page_table_t* curr = get_page_entry((void*)addr);
+    if (curr -> entry.state == EVICTED) {
+      node_t * new_node = malloc(sizeof(node_t));
+      new_node -> size = curr -> entry.offset;
+      new_node -> next = NULL;
+      if (free_head == NULL) {
+        free_head = new_node;
+        free_tail = new_node;
+      } else {
+        free_tail -> next = new_node;
+        free_tail = new_node;
+      }
+    } 
+    else if (curr -> entry.state == DIRTY && curr -> entry.fd != -1) {
+       if (pwrite(curr -> entry.fd, (void*)addr, PAGE_SIZE, curr -> entry.offset * PAGE_SIZE) == -1) {
+         fprintf(stderr, "\nError %d: Writing to \"testing\" file failed: %s %ld %ld\n", errno, strerror(errno), curr -> entry.offset, addr);
+       }
+    } 
+    addr += PAGE_SIZE;
     remove_recur(&highest_level_table, PAGE_TABLE_LAYER - 1, idx);
     increment_idx(idx, PAGE_ENTRY_COUNT);
     //printf("freed: %ld\n", (long)(mem) + i*PAGE_SIZE);
   }
+ 
   update_resident_list();
   if (resident_count == 0)
     reset_swap();
@@ -407,6 +453,3 @@ void userswap_free(void *mem) {
   free(itor);
 }
 
-void *userswap_map(int fd, size_t size) {
-  return NULL;
-}

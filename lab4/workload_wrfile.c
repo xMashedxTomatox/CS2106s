@@ -62,11 +62,9 @@ int main(int argc, char *argv[]) {
     }
     munmap(file_map, memory_size);
   }
-
   if (pread(tempfile, mem, memory_size, 0) != memory_size) {
     fprintf(stderr, "Failed to write back from temporary file\n");
   }
-
   for (size_t i = 0; i < memory_size / sizeof(uintptr_t); ++i) {
     if (mem[i] != i) {
       printf("Failed read at entry %zu, expected %zx, got %" PRIxPTR "\n", i, i, file_map[i]);

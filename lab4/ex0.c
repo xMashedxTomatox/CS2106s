@@ -57,7 +57,7 @@ void *userswap_alloc(size_t size) {
     sigaction(SIGSEGV, &action, NULL);
     sigseg_set = true;
   }
-
+  
   size_t extra = PAGE_SIZE - (size % PAGE_SIZE);
   size += extra;
   
